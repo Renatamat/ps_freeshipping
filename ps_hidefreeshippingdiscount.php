@@ -18,7 +18,7 @@ class Ps_hidefreeshippingdiscount extends Module
         parent::__construct();
 
         $this->displayName = $this->l('Hide free shipping discount amount');
-        $this->description = $this->l('Shows free-shipping discount as text only in cart/order presentation and keeps discount subtotal clean.');
+        $this->description = $this->l('Shows only free shipping text in shipping subtotal when a free-shipping voucher is applied.');
     }
 
     public function install()
@@ -35,58 +35,14 @@ class Ps_hidefreeshippingdiscount extends Module
         }
 
         $presentedCart = &$params['presentedCart'];
-        $label = $this->getFreeShippingLabel();
-
-        $freeShippingDiscount = 0.0;
-
-        $vouchers = $this->getNode($presentedCart, 'vouchers');
-        if ($this->isContainer($vouchers)) {
-            $added = $this->getNode($vouchers, 'added');
-            if (is_array($added)) {
-                foreach ($added as $idx => $voucher) {
-                    if (!$this->isFreeShippingRow($voucher)) {
-                        continue;
-                    }
-
-                    $freeShippingDiscount += $this->extractAmount($voucher, ['reduction_float', 'reduction', 'value_float', 'value', 'amount']);
-                    $voucher = $this->applyTextOnlyDiscountLabel($voucher, $label);
-                    $added[$idx] = $voucher;
-                }
-
-                $this->setNode($vouchers, 'added', $added);
-                $this->setNode($presentedCart, 'vouchers', $vouchers);
-            }
-        }
-
-        $discountRows = $this->getNode($presentedCart, 'discounts');
-        if (is_array($discountRows)) {
-            foreach ($discountRows as $idx => $row) {
-                if (!$this->isFreeShippingRow($row)) {
-                    continue;
-                }
-
-                $freeShippingDiscount += $this->extractAmount($row, ['value_float', 'value', 'amount', 'reduction_float', 'reduction']);
-                $row = $this->applyTextOnlyDiscountLabel($row, $label);
-                $discountRows[$idx] = $row;
-            }
-
-            $this->setNode($presentedCart, 'discounts', $discountRows);
-        }
+        $label = $this->getFreeShippingText();
 
         $subtotals = $this->getNode($presentedCart, 'subtotals');
         if ($this->isContainer($subtotals)) {
-            $discountSubtotal = $this->getNode($subtotals, 'discounts');
-            if ($this->isContainer($discountSubtotal) && $freeShippingDiscount > 0) {
-                $current = $this->extractAmount($discountSubtotal, ['amount', 'value', 'amount_float', 'value_float']);
-                $new = max(0.0, $current - $freeShippingDiscount);
-                $this->setNumericPresentation($discountSubtotal, $new);
-                $this->setNode($subtotals, 'discounts', $discountSubtotal);
-            }
-
-            if ($freeShippingDiscount > 0 || $this->hasAnyFreeShippingRule($presentedCart)) {
+            if ($this->hasAnyFreeShippingRule($presentedCart)) {
                 $shippingSubtotal = $this->getNode($subtotals, 'shipping');
                 if ($this->isContainer($shippingSubtotal)) {
-                    $shippingSubtotal = $this->applyFreeShippingToShippingSubtotal($shippingSubtotal, $label);
+                    $shippingSubtotal = $this->applyFreeShippingTextToShippingSubtotal($shippingSubtotal, $label);
                     $this->setNode($subtotals, 'shipping', $shippingSubtotal);
                 }
             }
@@ -104,39 +60,14 @@ class Ps_hidefreeshippingdiscount extends Module
         }
 
         $presentedOrder = &$params['presentedOrder'];
-        $label = $this->getFreeShippingLabel();
-
-        $freeShippingDiscount = 0.0;
-
-        $discounts = $this->getNode($presentedOrder, 'discounts');
-        if (is_array($discounts)) {
-            foreach ($discounts as $idx => $discount) {
-                if (!$this->isFreeShippingRow($discount)) {
-                    continue;
-                }
-
-                $freeShippingDiscount += $this->extractAmount($discount, ['value_float', 'value', 'amount', 'reduction', 'reduction_float']);
-                $discount = $this->applyTextOnlyDiscountLabel($discount, $label);
-                $discounts[$idx] = $discount;
-            }
-
-            $this->setNode($presentedOrder, 'discounts', $discounts);
-        }
+        $label = $this->getFreeShippingText();
 
         $totals = $this->getNode($presentedOrder, 'totals');
         if ($this->isContainer($totals)) {
-            $discountTotal = $this->getNode($totals, 'discounts');
-            if ($this->isContainer($discountTotal) && $freeShippingDiscount > 0) {
-                $current = $this->extractAmount($discountTotal, ['amount', 'value', 'amount_float', 'value_float']);
-                $new = max(0.0, $current - $freeShippingDiscount);
-                $this->setNumericPresentation($discountTotal, $new);
-                $this->setNode($totals, 'discounts', $discountTotal);
-            }
-
-            if ($freeShippingDiscount > 0 || $this->hasAnyFreeShippingRule($presentedOrder)) {
+            if ($this->hasAnyFreeShippingRule($presentedOrder)) {
                 $shippingTotal = $this->getNode($totals, 'shipping');
                 if ($this->isContainer($shippingTotal)) {
-                    $shippingTotal = $this->applyFreeShippingToShippingSubtotal($shippingTotal, $label);
+                    $shippingTotal = $this->applyFreeShippingTextToShippingSubtotal($shippingTotal, $label);
                     $this->setNode($totals, 'shipping', $shippingTotal);
                 }
             }
@@ -147,33 +78,12 @@ class Ps_hidefreeshippingdiscount extends Module
         $this->debugLog('Order presentation adjusted for free shipping.');
     }
 
-    private function getFreeShippingLabel()
+    private function getFreeShippingText()
     {
-        return $this->trans('Free shipping', [], 'Shop.Theme.Checkout', $this->context->language->locale);
+        return $this->l('Za darmo');
     }
 
-    private function applyTextOnlyDiscountLabel($row, $label)
-    {
-        if (!$this->isContainer($row)) {
-            return $row;
-        }
-
-        foreach (['reduction_formatted', 'value_formatted', 'reduction', 'value', 'amount', 'discount'] as $key) {
-            if ($this->hasNode($row, $key)) {
-                $this->setNode($row, $key, $label);
-            }
-        }
-
-        foreach (['reduction_float', 'value_float', 'amount_float', 'discount_float'] as $key) {
-            if ($this->hasNode($row, $key)) {
-                $this->setNode($row, $key, 0.0);
-            }
-        }
-
-        return $row;
-    }
-
-    private function applyFreeShippingToShippingSubtotal($shippingSubtotal, $label)
+    private function applyFreeShippingTextToShippingSubtotal($shippingSubtotal, $label)
     {
         foreach (['value', 'value_formatted', 'label_value', 'amount_formatted'] as $textKey) {
             if ($this->hasNode($shippingSubtotal, $textKey)) {
@@ -181,28 +91,7 @@ class Ps_hidefreeshippingdiscount extends Module
             }
         }
 
-        foreach (['amount', 'value_float', 'amount_float', 'shipping_cost', 'price', 'raw_amount'] as $numericKey) {
-            if ($this->hasNode($shippingSubtotal, $numericKey)) {
-                $this->setNode($shippingSubtotal, $numericKey, 0.0);
-            }
-        }
-
         return $shippingSubtotal;
-    }
-
-    private function setNumericPresentation(&$container, $amount)
-    {
-        foreach (['amount', 'amount_float', 'value_float', 'value'] as $key) {
-            if ($this->hasNode($container, $key)) {
-                $this->setNode($container, $key, $amount);
-            }
-        }
-
-        foreach (['value_formatted', 'amount_formatted'] as $key) {
-            if ($this->hasNode($container, $key)) {
-                $this->setNode($container, $key, Tools::displayPrice($amount));
-            }
-        }
     }
 
     private function isFreeShippingRow($row)
@@ -256,18 +145,6 @@ class Ps_hidefreeshippingdiscount extends Module
         }
 
         return false;
-    }
-
-    private function extractAmount($container, array $keys)
-    {
-        foreach ($keys as $key) {
-            $value = $this->getNode($container, $key);
-            if (is_numeric($value)) {
-                return abs((float) $value);
-            }
-        }
-
-        return 0.0;
     }
 
     private function isContainer($value)

@@ -11,14 +11,14 @@ class Ps_hidefreeshippingdiscount extends Module
     {
         $this->name = 'ps_hidefreeshippingdiscount';
         $this->tab = 'front_office_features';
-        $this->version = '1.0.1';
+        $this->version = '1.1.0';
         $this->author = 'Custom';
         $this->need_instance = 0;
 
         parent::__construct();
 
         $this->displayName = $this->l('Hide free shipping discount amount');
-        $this->description = $this->l('Replaces free-shipping voucher amount with "Free shipping" label in cart and order presentation.');
+        $this->description = $this->l('Shows free-shipping discount as text only in cart/order presentation and keeps discount subtotal clean.');
     }
 
     public function install()
@@ -28,110 +28,299 @@ class Ps_hidefreeshippingdiscount extends Module
             && $this->registerHook('actionPresentOrder');
     }
 
-   public function hookActionPresentCart(array &$params)
+    public function hookActionPresentCart(array &$params)
     {
-       var_dump(empty($params['presentedCart']));
-       exit;
         if (empty($params['presentedCart'])) {
             return;
         }
-        
-        $presentedCart = $params['presentedCart'];
 
-        // PS 8: zwykle CartLazyArray (ArrayAccess), nie array
-        if (!is_array($presentedCart) && !($presentedCart instanceof ArrayAccess)) {
-            return;
-        }
+        $presentedCart = &$params['presentedCart'];
+        $label = $this->getFreeShippingLabel();
 
-        // teraz już przejdzie
-        // PrestaShopLogger::addLog('actionPresentCart OK', 1);
+        $freeShippingDiscount = 0.0;
 
-        $label = $this->trans('Free shipping', [], 'Shop.Theme.Checkout', $this->context->language->locale);
+        $vouchers = $this->getNode($presentedCart, 'vouchers');
+        if ($this->isContainer($vouchers)) {
+            $added = $this->getNode($vouchers, 'added');
+            if (is_array($added)) {
+                foreach ($added as $idx => $voucher) {
+                    if (!$this->isFreeShippingRow($voucher)) {
+                        continue;
+                    }
 
-        $vouchers = $presentedCart['vouchers'] ?? null;
-        if (is_array($vouchers) && !empty($vouchers['added']) && is_array($vouchers['added'])) {
-            foreach ($vouchers['added'] as &$voucher) {
-                if ($this->isFreeShippingVoucher($voucher)) {
-                    $voucher['reduction_formatted'] = $label;
+                    $freeShippingDiscount += $this->extractAmount($voucher, ['reduction_float', 'reduction', 'value_float', 'value', 'amount']);
+                    $voucher = $this->applyTextOnlyDiscountLabel($voucher, $label);
+                    $added[$idx] = $voucher;
                 }
-            }
-            unset($voucher);
 
-            // WAŻNE: przy LazyArray najlepiej robić offsetSet
-            if ($presentedCart instanceof ArrayAccess) {
-                // CartLazyArray ma offsetSet; 3-ci parametr (true) bywa wspierany jak w OrderLazyArray,
-                // ale jeśli rzuci błąd, użyj bez niego.
-                try {
-                    $presentedCart->offsetSet('vouchers', $vouchers, true);
-                } catch (Throwable $e) {
-                    $presentedCart->offsetSet('vouchers', $vouchers);
-                }
-            } else {
-                $params['presentedCart']['vouchers'] = $vouchers;
+                $this->setNode($vouchers, 'added', $added);
+                $this->setNode($presentedCart, 'vouchers', $vouchers);
             }
         }
+
+        $discountRows = $this->getNode($presentedCart, 'discounts');
+        if (is_array($discountRows)) {
+            foreach ($discountRows as $idx => $row) {
+                if (!$this->isFreeShippingRow($row)) {
+                    continue;
+                }
+
+                $freeShippingDiscount += $this->extractAmount($row, ['value_float', 'value', 'amount', 'reduction_float', 'reduction']);
+                $row = $this->applyTextOnlyDiscountLabel($row, $label);
+                $discountRows[$idx] = $row;
+            }
+
+            $this->setNode($presentedCart, 'discounts', $discountRows);
+        }
+
+        $subtotals = $this->getNode($presentedCart, 'subtotals');
+        if ($this->isContainer($subtotals)) {
+            $discountSubtotal = $this->getNode($subtotals, 'discounts');
+            if ($this->isContainer($discountSubtotal) && $freeShippingDiscount > 0) {
+                $current = $this->extractAmount($discountSubtotal, ['amount', 'value', 'amount_float', 'value_float']);
+                $new = max(0.0, $current - $freeShippingDiscount);
+                $this->setNumericPresentation($discountSubtotal, $new);
+                $this->setNode($subtotals, 'discounts', $discountSubtotal);
+            }
+
+            if ($freeShippingDiscount > 0 || $this->hasAnyFreeShippingRule($presentedCart)) {
+                $shippingSubtotal = $this->getNode($subtotals, 'shipping');
+                if ($this->isContainer($shippingSubtotal)) {
+                    $shippingSubtotal = $this->applyFreeShippingToShippingSubtotal($shippingSubtotal, $label);
+                    $this->setNode($subtotals, 'shipping', $shippingSubtotal);
+                }
+            }
+
+            $this->setNode($presentedCart, 'subtotals', $subtotals);
+        }
+
+        $this->debugLog('Cart presentation adjusted for free shipping.');
     }
 
     public function hookActionPresentOrder(array &$params)
     {
-        // w części instalacji najpierw ogarnijmy koszyk; order zostawiamy bezpiecznie
         if (empty($params['presentedOrder'])) {
             return;
         }
-        var_dump('aaaaaaaaaaa');
-        exit;
-        // Część instalacji ma OrderLazyArray, część zwykłą tablicę; obsłużmy oba
-        $label = $this->trans('Free shipping', [], 'Shop.Theme.Checkout', $this->context->language->locale);
 
-        if ($params['presentedOrder'] instanceof OrderLazyArray) {
-            $presentedOrder = $params['presentedOrder'];
-            $discounts = $presentedOrder['discounts'] ?? null;
+        $presentedOrder = &$params['presentedOrder'];
+        $label = $this->getFreeShippingLabel();
 
-            if (is_array($discounts)) {
-                foreach ($discounts as &$discount) {
-                    if ($this->isFreeShippingVoucher($discount)) {
-                        if (isset($discount['value_formatted'])) $discount['value_formatted'] = $label;
-                        if (isset($discount['value'])) $discount['value'] = $label;
-                    }
+        $freeShippingDiscount = 0.0;
+
+        $discounts = $this->getNode($presentedOrder, 'discounts');
+        if (is_array($discounts)) {
+            foreach ($discounts as $idx => $discount) {
+                if (!$this->isFreeShippingRow($discount)) {
+                    continue;
                 }
-                unset($discount);
-                $presentedOrder->offsetSet('discounts', $discounts, true);
+
+                $freeShippingDiscount += $this->extractAmount($discount, ['value_float', 'value', 'amount', 'reduction', 'reduction_float']);
+                $discount = $this->applyTextOnlyDiscountLabel($discount, $label);
+                $discounts[$idx] = $discount;
             }
 
-            return;
+            $this->setNode($presentedOrder, 'discounts', $discounts);
         }
 
-        // fallback: jeśli to tablica
-        if (is_array($params['presentedOrder']) && !empty($params['presentedOrder']['discounts']) && is_array($params['presentedOrder']['discounts'])) {
-            foreach ($params['presentedOrder']['discounts'] as &$discount) {
-                if ($this->isFreeShippingVoucher($discount)) {
-                    if (isset($discount['value_formatted'])) $discount['value_formatted'] = $label;
-                    if (isset($discount['value'])) $discount['value'] = $label;
+        $totals = $this->getNode($presentedOrder, 'totals');
+        if ($this->isContainer($totals)) {
+            $discountTotal = $this->getNode($totals, 'discounts');
+            if ($this->isContainer($discountTotal) && $freeShippingDiscount > 0) {
+                $current = $this->extractAmount($discountTotal, ['amount', 'value', 'amount_float', 'value_float']);
+                $new = max(0.0, $current - $freeShippingDiscount);
+                $this->setNumericPresentation($discountTotal, $new);
+                $this->setNode($totals, 'discounts', $discountTotal);
+            }
+
+            if ($freeShippingDiscount > 0 || $this->hasAnyFreeShippingRule($presentedOrder)) {
+                $shippingTotal = $this->getNode($totals, 'shipping');
+                if ($this->isContainer($shippingTotal)) {
+                    $shippingTotal = $this->applyFreeShippingToShippingSubtotal($shippingTotal, $label);
+                    $this->setNode($totals, 'shipping', $shippingTotal);
                 }
             }
-            unset($discount);
+
+            $this->setNode($presentedOrder, 'totals', $totals);
+        }
+
+        $this->debugLog('Order presentation adjusted for free shipping.');
+    }
+
+    private function getFreeShippingLabel()
+    {
+        return $this->trans('Free shipping', [], 'Shop.Theme.Checkout', $this->context->language->locale);
+    }
+
+    private function applyTextOnlyDiscountLabel($row, $label)
+    {
+        if (!$this->isContainer($row)) {
+            return $row;
+        }
+
+        foreach (['reduction_formatted', 'value_formatted', 'reduction', 'value', 'amount', 'discount'] as $key) {
+            if ($this->hasNode($row, $key)) {
+                $this->setNode($row, $key, $label);
+            }
+        }
+
+        foreach (['reduction_float', 'value_float', 'amount_float', 'discount_float'] as $key) {
+            if ($this->hasNode($row, $key)) {
+                $this->setNode($row, $key, 0.0);
+            }
+        }
+
+        return $row;
+    }
+
+    private function applyFreeShippingToShippingSubtotal($shippingSubtotal, $label)
+    {
+        foreach (['value', 'value_formatted', 'label_value', 'amount_formatted'] as $textKey) {
+            if ($this->hasNode($shippingSubtotal, $textKey)) {
+                $this->setNode($shippingSubtotal, $textKey, $label);
+            }
+        }
+
+        foreach (['amount', 'value_float', 'amount_float', 'shipping_cost', 'price', 'raw_amount'] as $numericKey) {
+            if ($this->hasNode($shippingSubtotal, $numericKey)) {
+                $this->setNode($shippingSubtotal, $numericKey, 0.0);
+            }
+        }
+
+        return $shippingSubtotal;
+    }
+
+    private function setNumericPresentation(&$container, $amount)
+    {
+        foreach (['amount', 'amount_float', 'value_float', 'value'] as $key) {
+            if ($this->hasNode($container, $key)) {
+                $this->setNode($container, $key, $amount);
+            }
+        }
+
+        foreach (['value_formatted', 'amount_formatted'] as $key) {
+            if ($this->hasNode($container, $key)) {
+                $this->setNode($container, $key, Tools::displayPrice($amount));
+            }
         }
     }
 
-    private function isFreeShippingVoucher($row): bool
+    private function isFreeShippingRow($row)
     {
-
-        if (!is_array($row)) {
+        if (!$this->isContainer($row)) {
             return false;
         }
 
-        // Jeśli prezenter już podał flagę
-        if (!empty($row['free_shipping'])) {
+        $flag = $this->getNode($row, 'free_shipping');
+        if ((int) $flag === 1 || $flag === true) {
             return true;
         }
 
-        // Najczęściej jest id_cart_rule
-        $idCartRule = (int)($row['id_cart_rule'] ?? 0);
+        $idCartRule = (int) $this->getNode($row, 'id_cart_rule');
+        if ($idCartRule <= 0) {
+            $idCartRule = (int) $this->getNode($row, 'cart_rule_id');
+        }
+        if ($idCartRule <= 0) {
+            $idCartRule = (int) $this->getNode($row, 'id');
+        }
+
         if ($idCartRule > 0) {
-            $rule = new CartRule($idCartRule);
-            return Validate::isLoadedObject($rule) && (int)$rule->free_shipping === 1;
+            $rule = new CartRule($idCartRule, (int) $this->context->language->id);
+            if (Validate::isLoadedObject($rule) && (int) $rule->free_shipping === 1) {
+                return true;
+            }
         }
 
         return false;
+    }
+
+    private function hasAnyFreeShippingRule($container)
+    {
+        foreach (['vouchers', 'discounts'] as $key) {
+            $node = $this->getNode($container, $key);
+            if (!$this->isContainer($node) && !is_array($node)) {
+                continue;
+            }
+
+            if ($key === 'vouchers' && $this->isContainer($node)) {
+                $node = $this->getNode($node, 'added');
+            }
+
+            if (is_array($node)) {
+                foreach ($node as $row) {
+                    if ($this->isFreeShippingRow($row)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private function extractAmount($container, array $keys)
+    {
+        foreach ($keys as $key) {
+            $value = $this->getNode($container, $key);
+            if (is_numeric($value)) {
+                return abs((float) $value);
+            }
+        }
+
+        return 0.0;
+    }
+
+    private function isContainer($value)
+    {
+        return is_array($value) || $value instanceof ArrayAccess || $value instanceof OrderLazyArray;
+    }
+
+    private function hasNode($container, $key)
+    {
+        if (is_array($container)) {
+            return array_key_exists($key, $container);
+        }
+
+        if ($container instanceof ArrayAccess) {
+            return $container->offsetExists($key);
+        }
+
+        return false;
+    }
+
+    private function getNode($container, $key)
+    {
+        if (is_array($container)) {
+            return array_key_exists($key, $container) ? $container[$key] : null;
+        }
+
+        if ($container instanceof ArrayAccess) {
+            return $container->offsetExists($key) ? $container[$key] : null;
+        }
+
+        return null;
+    }
+
+    private function setNode(&$container, $key, $value)
+    {
+        if (is_array($container)) {
+            $container[$key] = $value;
+            return;
+        }
+
+        if ($container instanceof ArrayAccess) {
+            try {
+                $container->offsetSet($key, $value, true);
+            } catch (Throwable $e) {
+                $container->offsetSet($key, $value);
+            }
+        }
+    }
+
+    private function debugLog($message)
+    {
+        if (defined('_PS_MODE_DEV_') && _PS_MODE_DEV_ === true) {
+            PrestaShopLogger::addLog('[ps_hidefreeshippingdiscount] ' . $message, 1);
+        }
     }
 }
